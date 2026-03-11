@@ -4,7 +4,7 @@
 // DESCRIPTION: Displays your saved albums in a shuffled grid.
 
 const { React } = Spicetify;
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useMemo } = React;
 
 // ---------------------------------------------------------------------------
 // Fisher-Yates shuffle – produces an unbiased random permutation in O(n).
@@ -19,20 +19,9 @@ function fisherYatesShuffle(array) {
 }
 
 // ---------------------------------------------------------------------------
-// Returns pre-save metadata for an item. isPreSave is true when the album
-// has a future release date (i.e. saved before it's out).
-// ---------------------------------------------------------------------------
-function getPreSaveInfo(item) {
-  const raw = item.release_date ?? item.releaseDate;
-  if (!raw) return { isPreSave: false, releaseDate: null };
-  const date = new Date(raw);
-  return { isPreSave: date > new Date(), releaseDate: date };
-}
-
-// ---------------------------------------------------------------------------
 // Fetch every saved album from the user's library, handling pagination.
 // ---------------------------------------------------------------------------
-async function fetchAllSavedAlbums() {
+async function fetchAllSavedAlbums(onProgress) {
   const albums = [];
   const limit = 50;
   let offset = 0;
@@ -49,19 +38,17 @@ async function fetchAllSavedAlbums() {
     if (!response || !response.items) break;
 
     for (const item of response.items) {
-      const { isPreSave, releaseDate } = getPreSaveInfo(item);
       albums.push({
         uri: item.uri,
         name: item.name,
         artist: item.artists?.map((a) => a.name).join(", ") ?? "Unknown Artist",
         imageUrl: item.images?.[0]?.url ?? item.imgUrl ?? "",
-        isPreSave,
-        releaseDate,
       });
     }
 
     total = response.totalLength ?? response.total ?? albums.length;
     offset += limit;
+    onProgress?.(albums.length, total);
   }
 
   return albums;
@@ -72,6 +59,36 @@ let albumCache = null;
 let shuffledCache = null;
 let syncInFlight = false;
 
+const STORAGE_KEY = "random-albums:shuffled-uris";
+
+// Persist the shuffled URI order so it survives a full Spotify relaunch.
+function saveShuffleOrder(shuffled) {
+  try {
+    Spicetify.LocalStorage.set(STORAGE_KEY, JSON.stringify(shuffled.map((a) => a.uri)));
+  } catch (_) {}
+}
+
+// Restore a previous shuffle order by re-mapping URIs back to full album objects.
+function loadShuffleOrder(albumList) {
+  try {
+    const raw = Spicetify.LocalStorage.get(STORAGE_KEY);
+    if (!raw) return null;
+    const uris = JSON.parse(raw);
+    const byUri = new Map(albumList.map((a) => [a.uri, a]));
+    const restored = uris.map((u) => byUri.get(u)).filter(Boolean);
+    // If the library shrank significantly the stored order may be stale – discard it.
+    if (restored.length < albumList.length * 0.5) return null;
+    // Append any albums not present in the stored order (newly saved ones).
+    const restoredSet = new Set(uris);
+    for (const a of albumList) {
+      if (!restoredSet.has(a.uri)) restored.push(a);
+    }
+    return restored;
+  } catch (_) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sync albums with the library.
 //  • No cache      → full fetch.
@@ -79,12 +96,12 @@ let syncInFlight = false;
 //  • More albums   → incrementally fetch only the new ones from the front.
 //  • Fewer albums  → full re-fetch (something was removed).
 // ---------------------------------------------------------------------------
-async function syncAlbums() {
+async function syncAlbums(onProgress) {
   if (syncInFlight) return albumCache;
   syncInFlight = true;
   try {
   if (!albumCache) {
-    albumCache = await fetchAllSavedAlbums();
+    albumCache = await fetchAllSavedAlbums(onProgress);
     return albumCache;
   }
 
@@ -104,7 +121,7 @@ async function syncAlbums() {
 
   // Albums were removed – full re-fetch.
   if (total < albumCache.length) {
-    albumCache = await fetchAllSavedAlbums();
+    albumCache = await fetchAllSavedAlbums(onProgress);
     return albumCache;
   }
 
@@ -127,14 +144,11 @@ async function syncAlbums() {
     if (!page?.items) break;
     for (const item of page.items) {
       if (cacheSet.has(item.uri)) { hitExisting = true; break; }
-      const { isPreSave, releaseDate } = getPreSaveInfo(item);
       newAlbums.push({
         uri: item.uri,
         name: item.name,
         artist: item.artists?.map((a) => a.name).join(", ") ?? "Unknown Artist",
         imageUrl: item.images?.[0]?.url ?? item.imgUrl ?? "",
-        isPreSave,
-        releaseDate,
       });
     }
     offset += 50;
@@ -244,20 +258,65 @@ const STYLES = {
     boxShadow: "0 8px 8px rgba(0,0,0,.3)",
     transition: "transform 0.2s ease, opacity 0.2s ease",
   },
-  preSaveBadge: {
+  filterBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    marginBottom: "24px",
+    flexWrap: "wrap",
+  },
+  searchWrapper: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  searchIcon: {
     position: "absolute",
-    top: "8px",
-    left: "8px",
-    background: "rgba(0,0,0,0.7)",
-    color: "#fff",
-    fontSize: "10px",
-    fontWeight: "700",
-    letterSpacing: "0.06em",
-    textTransform: "uppercase",
-    padding: "3px 7px",
-    borderRadius: "3px",
+    left: "10px",
+    color: "var(--spice-subtext)",
     pointerEvents: "none",
-    backdropFilter: "blur(4px)",
+  },
+  searchInput: {
+    background: "rgba(255,255,255,0.07)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: "500px",
+    color: "var(--spice-text)",
+    fontSize: "14px",
+    padding: "8px 16px 8px 34px",
+    outline: "none",
+    width: "220px",
+  },
+  selectWrapper: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  selectChevron: {
+    position: "absolute",
+    right: "10px",
+    color: "var(--spice-subtext)",
+    pointerEvents: "none",
+  },
+  select: {
+    appearance: "none",
+    background: "var(--spice-card, #282828)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: "500px",
+    color: "var(--spice-text)",
+    fontSize: "13px",
+    padding: "8px 30px 8px 14px",
+    outline: "none",
+    cursor: "pointer",
+    colorScheme: "dark",
+  },
+  clearBtn: {
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: "500px",
+    color: "var(--spice-subtext)",
+    fontSize: "13px",
+    padding: "7px 14px",
+    cursor: "pointer",
   },
   loading: {
     display: "flex",
@@ -276,6 +335,58 @@ const STYLES = {
 };
 
 // ---------------------------------------------------------------------------
+// FilterBar component – search and sort controls.
+// ---------------------------------------------------------------------------
+function FilterBar({ searchQuery, onSearchChange, sortBy, onSortChange, hasActiveFilters, onClear }) {
+  return React.createElement(
+    "div",
+    { style: STYLES.filterBar },
+    // Search input
+    React.createElement(
+      "div",
+      { style: STYLES.searchWrapper },
+      React.createElement(
+        "svg",
+        { style: STYLES.searchIcon, width: "16", height: "16", viewBox: "0 0 24 24", fill: "currentColor" },
+        React.createElement("path", { d: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" })
+      ),
+      React.createElement("input", {
+        type: "text",
+        placeholder: "Search albums or artists\u2026",
+        value: searchQuery,
+        onChange: (e) => onSearchChange(e.target.value),
+        style: STYLES.searchInput,
+      })
+    ),
+    // Sort dropdown
+    React.createElement(
+      "div",
+      { style: STYLES.selectWrapper },
+      React.createElement(
+        "select",
+        { value: sortBy, onChange: (e) => onSortChange(e.target.value), style: STYLES.select },
+        React.createElement("option", { value: "shuffle" }, "Shuffled"),
+        React.createElement("option", { value: "name-asc" }, "Album A\u2013Z"),
+        React.createElement("option", { value: "name-desc" }, "Album Z\u2013A"),
+        React.createElement("option", { value: "artist-asc" }, "Artist A\u2013Z"),
+        React.createElement("option", { value: "artist-desc" }, "Artist Z\u2013A")
+      ),
+      React.createElement(
+        "svg",
+        { style: STYLES.selectChevron, width: "12", height: "12", viewBox: "0 0 24 24", fill: "currentColor" },
+        React.createElement("path", { d: "M7 10l5 5 5-5z" })
+      )
+    ),
+    // Clear filters
+    hasActiveFilters && React.createElement(
+      "button",
+      { style: STYLES.clearBtn, onClick: onClear },
+      "Clear filters"
+    )
+  );
+}
+
+// ---------------------------------------------------------------------------
 // AlbumCard component – individual album tile in the grid.
 // ---------------------------------------------------------------------------
 function AlbumCard({ album }) {
@@ -288,13 +399,8 @@ function AlbumCard({ album }) {
 
   function handlePlay(e) {
     e.stopPropagation();
-    if (album.isPreSave) return;
     Spicetify.Player.playUri(album.uri);
   }
-
-  const releaseDateLabel = album.isPreSave && album.releaseDate
-    ? album.releaseDate.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
-    : null;
 
   return React.createElement(
     "div",
@@ -319,14 +425,8 @@ function AlbumCard({ album }) {
         : React.createElement("div", {
             style: { ...STYLES.image, background: "var(--spice-card, #333)" },
           }),
-      // Pre-save badge
-      album.isPreSave && React.createElement(
-        "div",
-        { style: STYLES.preSaveBadge },
-        releaseDateLabel ? "Pre-save \u00B7 " + releaseDateLabel : "Pre-save"
-      ),
-      // Play button – fades in on hover (hidden for pre-saves)
-      !album.isPreSave && React.createElement(
+      // Play button – fades in on hover
+      React.createElement(
         "button",
         {
           style: {
@@ -360,14 +460,20 @@ function RandomAlbumsPage() {
   const [shuffled, setShuffled] = useState(shuffledCache ?? []);
   const [loading, setLoading] = useState(shuffledCache === null);
   const [error, setError] = useState(null);
-
+  const [fetchProgress, setFetchProgress] = useState(null); // { done, total } during library load
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState("shuffle");
   useEffect(() => {
-    syncAlbums()
+    syncAlbums((done, total) => setFetchProgress({ done, total }))
       .then((data) => {
         setAlbums(data);
-        // Only generate a new shuffle on first load; preserve order on revisit.
-        if (!shuffledCache) shuffledCache = fisherYatesShuffle(data);
+        // Restore persisted order, fall back to a fresh shuffle on first ever load.
+        if (!shuffledCache) {
+          shuffledCache = loadShuffleOrder(data) ?? fisherYatesShuffle(data);
+          saveShuffleOrder(shuffledCache);
+        }
         setShuffled(shuffledCache);
+        setFetchProgress(null);
       })
       .catch((err) => {
         console.error("[Random Albums]", err);
@@ -381,18 +487,66 @@ function RandomAlbumsPage() {
     syncAlbums()
       .then((data) => {
         shuffledCache = fisherYatesShuffle(data);
+        saveShuffleOrder(shuffledCache);
         setAlbums(data);
         setShuffled(shuffledCache);
       })
       .catch(() => {
         // Fall back to reshuffling what we already have.
         shuffledCache = fisherYatesShuffle(albums);
+        saveShuffleOrder(shuffledCache);
         setShuffled(shuffledCache);
       });
   }, [albums]);
 
+  // Apply all active filters + sort on top of the shuffled/sorted base list.
+  const displayed = useMemo(() => {
+    let list = sortBy === "shuffle" ? [...shuffled] : [...albums];
+    if (sortBy === "name-asc")         list.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sortBy === "name-desc")   list.sort((a, b) => b.name.localeCompare(a.name));
+    else if (sortBy === "artist-asc")  list.sort((a, b) => a.artist.localeCompare(b.artist));
+    else if (sortBy === "artist-desc") list.sort((a, b) => b.artist.localeCompare(a.artist));
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter((a) => a.name.toLowerCase().includes(q) || a.artist.toLowerCase().includes(q));
+    }
+    return list;
+  }, [shuffled, albums, sortBy, searchQuery]);
+
+  const hasActiveFilters = searchQuery.trim() !== "" || sortBy !== "shuffle";
+
+  function handleClearFilters() {
+    setSearchQuery("");
+    setSortBy("shuffle");
+  }
+
   if (loading) {
-    return React.createElement("div", { style: STYLES.loading }, "Loading your albums\u2026");
+    return React.createElement(
+      "div",
+      { style: STYLES.loading },
+      React.createElement(
+        "div",
+        { style: { textAlign: "center" } },
+        React.createElement("div", { style: { marginBottom: "16px", color: "var(--spice-subtext)", fontSize: "16px" } },
+          fetchProgress && fetchProgress.total > 0
+            ? "Loading your albums\u2026 " + fetchProgress.done + " / " + fetchProgress.total
+            : "Loading your albums\u2026"
+        ),
+        fetchProgress && fetchProgress.total > 0 && React.createElement(
+          "div",
+          { style: { width: "240px", height: "4px", background: "rgba(255,255,255,0.1)", borderRadius: "2px", overflow: "hidden" } },
+          React.createElement("div", {
+            style: {
+              width: Math.round((fetchProgress.done / fetchProgress.total) * 100) + "%",
+              height: "100%",
+              background: "#1ed760",
+              borderRadius: "2px",
+              transition: "width 0.2s ease",
+            },
+          })
+        )
+      )
+    );
   }
 
   if (error) {
@@ -407,6 +561,10 @@ function RandomAlbumsPage() {
     );
   }
 
+  const subtitleText = hasActiveFilters
+    ? "Showing " + displayed.length + " of " + albums.length + " albums"
+    : albums.length + " albums shuffled";
+
   return React.createElement(
     "div",
     { style: STYLES.page },
@@ -418,13 +576,8 @@ function RandomAlbumsPage() {
         "div",
         null,
         React.createElement("div", { style: STYLES.title }, "Random Albums"),
-        React.createElement(
-          "div",
-          { style: STYLES.subtitle },
-          shuffled.length + " albums shuffled"
-        )
+        React.createElement("div", { style: STYLES.subtitle }, subtitleText)
       ),
-      // Shuffle – instant reorder; mount effect already synced new albums
       React.createElement(
         "button",
         {
@@ -444,11 +597,26 @@ function RandomAlbumsPage() {
         "Shuffle"
       )
     ),
+    // Filter bar
+    React.createElement(FilterBar, {
+      searchQuery,
+      onSearchChange: setSearchQuery,
+      sortBy,
+      onSortChange: setSortBy,
+      hasActiveFilters,
+      onClear: handleClearFilters,
+    }),
+    // Empty state when active filters yield no results
+    displayed.length === 0 && React.createElement(
+      "div",
+      { style: STYLES.loading },
+      "No albums match your filters."
+    ),
     // Album grid
-    React.createElement(
+    displayed.length > 0 && React.createElement(
       "div",
       { style: STYLES.grid, className: "main-gridContainer-gridContainer" },
-      shuffled.map((album, i) =>
+      displayed.map((album, i) =>
         React.createElement(AlbumCard, { key: album.uri + "-" + i, album })
       )
     )
