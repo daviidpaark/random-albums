@@ -19,6 +19,17 @@ function fisherYatesShuffle(array) {
 }
 
 // ---------------------------------------------------------------------------
+// Returns pre-save metadata for an item. isPreSave is true when the album
+// has a future release date (i.e. saved before it's out).
+// ---------------------------------------------------------------------------
+function getPreSaveInfo(item) {
+  const raw = item.release_date ?? item.releaseDate;
+  if (!raw) return { isPreSave: false, releaseDate: null };
+  const date = new Date(raw);
+  return { isPreSave: date > new Date(), releaseDate: date };
+}
+
+// ---------------------------------------------------------------------------
 // Fetch every saved album from the user's library, handling pagination.
 // ---------------------------------------------------------------------------
 async function fetchAllSavedAlbums() {
@@ -38,11 +49,14 @@ async function fetchAllSavedAlbums() {
     if (!response || !response.items) break;
 
     for (const item of response.items) {
+      const { isPreSave, releaseDate } = getPreSaveInfo(item);
       albums.push({
         uri: item.uri,
         name: item.name,
         artist: item.artists?.map((a) => a.name).join(", ") ?? "Unknown Artist",
         imageUrl: item.images?.[0]?.url ?? item.imgUrl ?? "",
+        isPreSave,
+        releaseDate,
       });
     }
 
@@ -113,11 +127,14 @@ async function syncAlbums() {
     if (!page?.items) break;
     for (const item of page.items) {
       if (cacheSet.has(item.uri)) { hitExisting = true; break; }
+      const { isPreSave, releaseDate } = getPreSaveInfo(item);
       newAlbums.push({
         uri: item.uri,
         name: item.name,
         artist: item.artists?.map((a) => a.name).join(", ") ?? "Unknown Artist",
         imageUrl: item.images?.[0]?.url ?? item.imgUrl ?? "",
+        isPreSave,
+        releaseDate,
       });
     }
     offset += 50;
@@ -227,6 +244,21 @@ const STYLES = {
     boxShadow: "0 8px 8px rgba(0,0,0,.3)",
     transition: "transform 0.2s ease, opacity 0.2s ease",
   },
+  preSaveBadge: {
+    position: "absolute",
+    top: "8px",
+    left: "8px",
+    background: "rgba(0,0,0,0.7)",
+    color: "#fff",
+    fontSize: "10px",
+    fontWeight: "700",
+    letterSpacing: "0.06em",
+    textTransform: "uppercase",
+    padding: "3px 7px",
+    borderRadius: "3px",
+    pointerEvents: "none",
+    backdropFilter: "blur(4px)",
+  },
   loading: {
     display: "flex",
     justifyContent: "center",
@@ -256,8 +288,13 @@ function AlbumCard({ album }) {
 
   function handlePlay(e) {
     e.stopPropagation();
+    if (album.isPreSave) return;
     Spicetify.Player.playUri(album.uri);
   }
+
+  const releaseDateLabel = album.isPreSave && album.releaseDate
+    ? album.releaseDate.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+    : null;
 
   return React.createElement(
     "div",
@@ -282,8 +319,14 @@ function AlbumCard({ album }) {
         : React.createElement("div", {
             style: { ...STYLES.image, background: "var(--spice-card, #333)" },
           }),
-      // Play button – fades in on hover
-      React.createElement(
+      // Pre-save badge
+      album.isPreSave && React.createElement(
+        "div",
+        { style: STYLES.preSaveBadge },
+        releaseDateLabel ? "Pre-save \u00B7 " + releaseDateLabel : "Pre-save"
+      ),
+      // Play button – fades in on hover (hidden for pre-saves)
+      !album.isPreSave && React.createElement(
         "button",
         {
           style: {
