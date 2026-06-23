@@ -462,7 +462,15 @@ function RandomAlbumsPage() {
   const [error, setError] = useState(null);
   const [fetchProgress, setFetchProgress] = useState(null); // { done, total } during library load
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [sortBy, setSortBy] = useState("shuffle");
+
+  // Debounce search input so filtering doesn't run on every keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 200);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   useEffect(() => {
     syncAlbums((done, total) => setFetchProgress({ done, total }))
       .then((data) => {
@@ -506,12 +514,12 @@ function RandomAlbumsPage() {
     else if (sortBy === "name-desc")   list.sort((a, b) => b.name.localeCompare(a.name));
     else if (sortBy === "artist-asc")  list.sort((a, b) => a.artist.localeCompare(b.artist));
     else if (sortBy === "artist-desc") list.sort((a, b) => b.artist.localeCompare(a.artist));
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase();
+    if (debouncedQuery.trim()) {
+      const q = debouncedQuery.trim().toLowerCase();
       list = list.filter((a) => a.name.toLowerCase().includes(q) || a.artist.toLowerCase().includes(q));
     }
     return list;
-  }, [shuffled, albums, sortBy, searchQuery]);
+  }, [shuffled, albums, sortBy, debouncedQuery]);
 
   const hasActiveFilters = searchQuery.trim() !== "" || sortBy !== "shuffle";
 
