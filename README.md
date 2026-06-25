@@ -30,7 +30,7 @@ iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-albums/main/inst
 
 **macOS / Linux**
 ```bash
-bash <(curl -s "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh")
+curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh" | sh
 ```
 
 The script will:
