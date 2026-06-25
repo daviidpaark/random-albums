@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # random-albums Spicetify installer
-# One-liner: bash <(curl -s "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh")
+# One-liner: curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh" | bash
 
 set -euo pipefail
 
