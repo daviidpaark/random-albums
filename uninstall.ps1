@@ -1,17 +1,23 @@
-# random-albums Spicetify uninstaller
-# One-liner: iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-albums/main/uninstall.ps1" | iex
+# random-library Spicetify uninstaller
+# One-liner: iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-library/main/uninstall.ps1" | iex
 
 $ErrorActionPreference = "Stop"
-
-$spicePath = "$env:APPDATA\spicetify"
-$configFile = "$spicePath\config-xpui.ini"
 
 if (-not (Get-Command spicetify -ErrorAction SilentlyContinue)) {
     Write-Error "spicetify not found in PATH."
     exit 1
 }
 
-$appsToRemove = @("random-albums")
+$spiceConfigPath = & spicetify -c 2>$null
+if ($spiceConfigPath -and (Test-Path $spiceConfigPath)) {
+    $spicePath  = Split-Path $spiceConfigPath -Parent
+    $configFile = $spiceConfigPath
+} else {
+    $spicePath  = "$env:APPDATA\spicetify"
+    $configFile = "$spicePath\config-xpui.ini"
+}
+
+$appsToRemove = @("random-library", "random-albums")
 
 # ── 1. Remove app folders ────────────────────────────────────────────────────
 foreach ($app in $appsToRemove) {
@@ -25,16 +31,16 @@ foreach ($app in $appsToRemove) {
 }
 
 # ── 2. Deregister from config-xpui.ini ──────────────────────────────────────
-$config = Get-Content $configFile -Raw
+if (Test-Path $configFile) {
+    $config = Get-Content $configFile -Raw
 
-foreach ($app in $appsToRemove) {
     if ($config -match "(?m)^(custom_apps\s*=\s*)(.*)$") {
         $key    = $Matches[1]
-        $values = $Matches[2] -split "\|" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and $_ -ne $app }
+        $values = $Matches[2] -split "\|" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" -and $appsToRemove -notcontains $_ }
         $newLine = "$key$($values -join '|')"
         $config  = $config -replace "(?m)^custom_apps\s*=.*$", $newLine
         Set-Content $configFile $config -NoNewline
-        Write-Host "Removed '$app' from config-xpui.ini" -ForegroundColor Green
+        Write-Host "Deregistered apps from config-xpui.ini" -ForegroundColor Green
     }
 }
 

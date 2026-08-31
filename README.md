@@ -1,18 +1,40 @@
-# random-albums
+# random-library
 
-A Spicetify custom app that displays your saved Spotify albums in a shuffled grid. Find it in the left sidebar under the shuffle icon.
+A Spicetify custom app that displays your saved Spotify albums and followed artists in a fast, shuffled, filterable grid with on-demand discography exploration, smart edition prioritization, and random discovery. Find it in the left sidebar under the shuffle icon.
 
 ## Features
 
-- **Persistent shuffle** — the shuffle order is saved to localStorage and restored the next time you open Spotify, so you always pick up where you left off
-- **Session caching** — navigating away and back within the same session preserves the current order without re-fetching your library
-- **Smart sync** — on each visit the app checks your library total; it only re-fetches if albums were added or removed, keeping things fast
-- **Reshuffle** — the **Shuffle** button generates a new random order and picks up any albums you've saved since the last visit
-- **Search** — filter the grid by album name or artist in real time
-- **Sort** — choose from Shuffled, Album A–Z, Album Z–A, Artist A–Z, or Artist Z–A
-- **Load progress** — a progress bar shows how many albums have been fetched while your library loads for the first time
-- **Click to open** — click any album card to go to its Spotify album page
-- **Play on hover** — hover over a card and click the green play button to start playback
+- **Standardized Modes**
+  - **`Albums`** — Instant local library view of all your saved albums.
+  - **`Artists`** — Shuffled grid of all the artists you follow with instant local loading.
+- **Symmetric Randomization**
+  - In **Albums** mode: Click **`Random Album`** to pick and open a random album from your saved collection.
+  - In **Artists** mode: Click **`Random Artist`** to pick a random followed artist and open their complete discography.
+- **In-App Random Navigation History (`◀ Previous` / `Next ▶`)**
+  - Seamlessly step backward and forward through your past random artist rolls without exiting the app.
+  - Interactive step counter (e.g. `3 of 5`) and instant 0ms cached loading.
+- **On-Demand Artist Discography & Native Release Filters**
+  - Click any followed artist to open their complete discography right inside the app.
+  - Native Spotify catalog categories:
+    - `All`
+    - `✓ In Library` (Isolates all releases by this artist saved in your library)
+    - `Albums` (Studio albums)
+    - `Singles & EPs`
+    - `Compilations`
+    - `Alternative Editions` (Releases featuring multiple expanded or deluxe editions)
+- **Smart Edition & Deluxe Prioritization**
+  - Automatically deduplicates multiple versions of the same album (standard, deluxe, expanded, anniversary, remastered).
+  - Prioritizes your exact saved library version if present; otherwise defaults to the most complete Deluxe/Expanded edition.
+  - Includes an interactive **`Edition ▾`** dropdown on album cards to switch between alternative releases on the fly.
+  - Visual **`✓`** badge on covers and dropdown items indicating library status.
+- **Continuous Filter Randomization** — Selected release filters (e.g. *Albums*, *Singles & EPs*, or *In Library*) persist across **Random Artist** rolls, enabling continuous randomized discovery within a specific category.
+- **Instant Library Sync / Refresh** — Click **`Refresh`** to sync newly saved albums and followed artists from Spotify in real time (also clears random navigation history).
+- **Fluid Responsive Grid Scaling** — Cards, icons, and avatars automatically scale from ultra-wide & 4K displays down to compact split-screen windows.
+- **Persistent Shuffle** — Shuffle order is preserved across app relaunches and sessions.
+- **Search & Sort**
+  - Real-time debounced search by album title or artist name.
+  - Multi-column sort options: *Shuffled*, *Album A–Z / Z–A*, or *Artist A–Z / Z–A*.
+- **Play on Hover** — Hover over any album or artist card and click the green play button to start playback immediately.
 
 ## Requirements
 
@@ -21,22 +43,20 @@ A Spicetify custom app that displays your saved Spotify albums in a shuffled gri
 
 ## Install
 
-The install scripts work whether you run them as a one-liner from the web or from a local clone of this repo. If run locally, files are copied directly; otherwise they are downloaded from GitHub.
-
 **Windows (PowerShell)**
 ```powershell
-iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.ps1" | iex
+iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-library/main/install.ps1" | iex
 ```
 
 **macOS / Linux**
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh" | bash
+curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-library/main/install.sh" | bash
 ```
 
 The script will:
-1. Verify `spicetify` is in your PATH and that `config-xpui.ini` exists
-2. Copy or download `index.js` and `manifest.json` into your Spicetify `CustomApps/random-albums/` folder
-3. Register the app in `config-xpui.ini`
+1. Verify `spicetify` is in your PATH and locate your `config-xpui.ini`
+2. Copy or download `index.js` and `manifest.json` into your Spicetify `CustomApps/random-library/` folder
+3. Clean legacy `random-albums` registrations and register `random-library` in `config-xpui.ini`
 4. Run `spicetify apply`
 
 Restart Spotify if it was already open.
@@ -45,28 +65,10 @@ Restart Spotify if it was already open.
 
 **Windows (PowerShell)**
 ```powershell
-iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-albums/main/uninstall.ps1" | iex
+iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-library/main/uninstall.ps1" | iex
 ```
 
 **macOS / Linux**
 ```bash
-bash <(curl -s "https://raw.githubusercontent.com/daviidpaark/random-albums/main/uninstall.sh")
-```
-
-The script will:
-1. Delete the `CustomApps/random-albums/` folder
-2. Remove the entry from `config-xpui.ini`
-3. Run `spicetify apply`
-
-## File Structure
-
-```
-random-albums/
-├── install.ps1          # Windows installer
-├── install.sh           # macOS/Linux installer
-├── uninstall.ps1        # Windows uninstaller
-├── uninstall.sh         # macOS/Linux uninstaller
-└── random-albums/
-    ├── index.js         # App source (vanilla JS + Spicetify React)
-    └── manifest.json    # App name and sidebar icon
+curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-library/main/uninstall.sh" | bash
 ```

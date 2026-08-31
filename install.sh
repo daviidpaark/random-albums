@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# random-albums Spicetify installer
-# One-liner: curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-albums/main/install.sh" | bash
+# random-library Spicetify installer
+# One-liner: curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-library/main/install.sh" | bash
 
 set -euo pipefail
 
-REPO_BASE_URL="https://raw.githubusercontent.com/daviidpaark/random-albums/main"
-
-get_app_files() {
-  case "$1" in
-    random-albums) echo "index.js manifest.json" ;;
-    *)             echo "" ;;
-  esac
-}
+REPO_BASE_URL="https://raw.githubusercontent.com/daviidpaark/random-library/main"
 
 # ── 1. Verify spicetify is installed ────────────────────────────────────────
 if ! command -v spicetify &>/dev/null; then
@@ -19,7 +12,14 @@ if ! command -v spicetify &>/dev/null; then
   exit 1
 fi
 
-SPICE_PATH="$(spicetify -c | xargs dirname)"
+# Locate spicetify directory
+CONFIG_PATH="$(spicetify -c 2>/dev/null || true)"
+if [[ -n "$CONFIG_PATH" && -f "$CONFIG_PATH" ]]; then
+  SPICE_PATH="$(dirname "$CONFIG_PATH")"
+else
+  SPICE_PATH="${XDG_CONFIG_HOME:-$HOME/.config}/spicetify"
+fi
+
 CONFIG_FILE="$SPICE_PATH/config-xpui.ini"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -27,11 +27,17 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   exit 1
 fi
 
-# Detect if running from a local clone (BASH_SOURCE[0] is /dev/fd/N when piped)
+# Detect if running from a local clone
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SCRIPT_DIR="."
-APPS=("random-albums")
+APPS=("random-library")
+LEGACY_APPS=("random-albums")
 
-# ── 2. Copy/download custom app files ─────────────────────────────────────────
+# ── 2. Clean legacy apps ──────────────────────────────────────────────────────
+for old_app in "${LEGACY_APPS[@]}"; do
+  rm -rf "$SPICE_PATH/CustomApps/$old_app"
+done
+
+# ── 3. Copy/download custom app files ─────────────────────────────────────────
 for app in "${APPS[@]}"; do
   dest="$SPICE_PATH/CustomApps/$app"
   src="$SCRIPT_DIR/$app"
@@ -44,7 +50,7 @@ for app in "${APPS[@]}"; do
     cp -r "$src/." "$dest/"
     echo "  Copied to $dest"
   else
-    for file in $(get_app_files "$app"); do
+    for file in index.js manifest.json; do
       echo "  Downloading $file..."
       curl -sL "$REPO_BASE_URL/$app/$file" -o "$dest/$file"
     done
@@ -52,28 +58,51 @@ for app in "${APPS[@]}"; do
   fi
 done
 
-# ── 3. Register apps in config-xpui.ini ──────────────────────────────────────
-for app in "${APPS[@]}"; do
-  # Read current custom_apps value
-  current="$(grep -E '^custom_apps\s*=' "$CONFIG_FILE" | sed 's/^custom_apps\s*=\s*//')"
+# ── 4. Register apps in config-xpui.ini ──────────────────────────────────────
+current_raw=""
+if [[ -f "$CONFIG_FILE" ]]; then
+  while IFS='=' read -r key val || [[ -n "$key" ]]; do
+    key_trimmed="$(echo "$key" | tr -d '[:space:]')"
+    if [[ "$key_trimmed" == "custom_apps" ]]; then
+      current_raw="$val"
+      break
+    fi
+  done < "$CONFIG_FILE"
+fi
 
-  # Check if already registered (exact match on pipe-delimited token)
-  if echo "$current" | tr '|' '\n' | grep -qx "$app"; then
+CLEAN_APPS=()
+IFS='|' read -ra TOKENS <<< "$current_raw"
+for t in "${TOKENS[@]}"; do
+  t_clean="$(echo "$t" | tr -d '[:space:]')"
+  if [[ -n "$t_clean" && "$t_clean" != "random-albums" ]]; then
+    CLEAN_APPS+=("$t_clean")
+  fi
+done
+
+for app in "${APPS[@]}"; do
+  already_present=false
+  for item in "${CLEAN_APPS[@]}"; do
+    if [[ "$item" == "$app" ]]; then
+      already_present=true
+      break
+    fi
+  done
+
+  if $already_present; then
     echo "'$app' already registered in config-xpui.ini"
   else
-    if [[ -z "$current" ]]; then
-      new_val="$app"
-    else
-      new_val="$current|$app"
-    fi
-    # Replace the line in-place (compatible with both macOS and Linux sed)
-    sed -i.bak "s|^custom_apps\s*=.*|custom_apps           = $new_val|" "$CONFIG_FILE"
-    rm -f "$CONFIG_FILE.bak"
+    CLEAN_APPS+=("$app")
     echo "Registered '$app' in config-xpui.ini"
   fi
 done
 
-# ── 4. Apply ──────────────────────────────────────────────────────────────────
+# Join with |
+joined_apps="$(IFS='|'; echo "${CLEAN_APPS[*]}")"
+
+# Set custom_apps natively via spicetify CLI
+spicetify config custom_apps "$joined_apps"
+
+# ── 5. Apply ──────────────────────────────────────────────────────────────────
 echo ""
 echo "Applying spicetify..."
 spicetify apply
