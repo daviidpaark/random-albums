@@ -72,3 +72,23 @@ iwr -useb "https://raw.githubusercontent.com/daviidpaark/random-library/main/uni
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/daviidpaark/random-library/main/uninstall.sh" | bash
 ```
+
+---
+
+## Disclaimer
+
+This project is an independent, open-source custom app and is not affiliated with, sponsored by, or endorsed by Spotify. Spotify is a registered trademark of Spotify AB.
+
+---
+
+## AI Disclosure & Personal Project Note
+
+> [!NOTE]
+> This project was developed as a personal project with the assistance of **GitHub Copilot (Claude Sonnet / Opus)** and **Google Antigravity (Gemini Flash / Pro)** AI pair programming. It is shared publicly for the benefit of the community and other Spotify and Spicetify users. Contributions, feedback, and issue reports are always welcome!
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
