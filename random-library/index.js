@@ -112,9 +112,47 @@ function normalizeAlbumTitle(title) {
     .replace(/\s*-\s*.*(deluxe|expanded|anniversary|remaster|special|bonus|clean|explicit|edition|re-?issue|reissue|mono|stereo|version|cut|box set|collector).*/gi, "")
     // Strip standalone year tag at end like (2017) or [2021]
     .replace(/\s*[\(\[\{]\d{4}[\)\]\}]/g, "")
-    .replace(/[^\w\s]/gi, "")
+    // Preserve Unicode letters and numbers across languages (e.g. Chinese/Japanese "猫猫", Cyrillic, etc.)
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// Normalize text for resilient search matching (strips accents & diacritics, lowercases)
+function normalizeSearchString(str) {
+  if (!str) return "";
+  return String(str)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\$/g, "s") // handle $ as 's' (e.g. $uicideboy$ -> suicideboys, Ke$ha -> kesha, A$AP -> asap)
+    .trim();
+}
+
+// Resilient search matcher supporting special characters, punctuation, and diacritics
+// (e.g. "juie" matches "JU!iE", "acdc" matches "AC/DC", "rosalia" matches "Rosalía", "jay z" matches "JAY-Z")
+function matchesSearchQuery(text, query) {
+  if (!query) return true;
+  if (!text) return false;
+
+  const normText = normalizeSearchString(text);
+  const normQuery = normalizeSearchString(query);
+  if (!normQuery) return true;
+
+  // 1. Direct normalized substring match (handles accents, diacritics & casing)
+  if (normText.includes(normQuery)) return true;
+
+  // 2. Punctuation-stripped match (replaces punctuation/symbols with spaces)
+  const strippedText = normText.replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  const strippedQuery = normQuery.replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+  if (strippedQuery && strippedText.includes(strippedQuery)) return true;
+
+  // 3. Compact match (strips all whitespace and symbols: "juie" matches "ju!ie", "acdc" matches "ac/dc")
+  const compactText = normText.replace(/[^\p{L}\p{N}]/gu, "");
+  const compactQuery = normQuery.replace(/[^\p{L}\p{N}]/gu, "");
+  if (compactText && compactQuery && compactText.includes(compactQuery)) return true;
+
+  return false;
 }
 
 // Extract edition metadata for alternative edition detection & badge tags
@@ -231,6 +269,136 @@ async function fetchAllFollowedArtists(onProgress) {
 // ---------------------------------------------------------------------------
 const artistDiscographyCache = new Map();
 
+// Helper to obtain Spotify access token across various desktop CEF / Spicetify versions
+async function getSpotifyAccessToken() {
+  try {
+    const authState = Spicetify.Platform?.AuthorizationAPI?.getState?.();
+    if (authState?.token?.accessToken) return authState.token.accessToken;
+    if (authState?.accessToken) return authState.accessToken;
+    if (Spicetify.Platform?.AuthorizationAPI?._tokenProvider?._lastToken) {
+      return Spicetify.Platform.AuthorizationAPI._tokenProvider._lastToken;
+    }
+    if (Spicetify.Platform?.Session?.accessToken) {
+      return Spicetify.Platform.Session.accessToken;
+    }
+    if (typeof Spicetify.Platform?.AuthorizationAPI?.getAccessToken === "function") {
+      const res = await Spicetify.Platform.AuthorizationAPI.getAccessToken();
+      if (res) return typeof res === "string" ? res : res.accessToken || res.token || "";
+    }
+    if (typeof Spicetify.Platform?.Session?.getAccessToken === "function") {
+      const res = await Spicetify.Platform.Session.getAccessToken();
+      if (res) return typeof res === "string" ? res : res.accessToken || res.token || "";
+    }
+    if (typeof Spicetify.Platform?.UserAPI?.getAccessToken === "function") {
+      const res = await Spicetify.Platform.UserAPI.getAccessToken();
+      if (res) return typeof res === "string" ? res : res.accessToken || res.token || "";
+    }
+  } catch (err) {
+    console.warn("[Random Library] Access token fetch error:", err);
+  }
+  return "";
+}
+
+// Resilient Web API requester: tries Bearer fetch, with automatic fallback to CosmosAsync
+async function fetchWebApiJson(url, token) {
+  if (token) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fall through to CosmosAsync
+    }
+  }
+  if (Spicetify.CosmosAsync?.get) {
+    try {
+      return await Spicetify.CosmosAsync.get(url);
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+// Build sanitized search queries for Spotify Web API (/v1/search uses Lucene syntax)
+// Reserved Lucene characters [+ - && || ! ( ) { } [ ] ^ " ~ * ? : \ /] break searches or act as NOT operators
+function buildSearchQueries(artistName) {
+  if (!artistName || !artistName.trim()) return [];
+
+  const raw = artistName.trim();
+  const queries = new Set();
+
+  // 1. Cleaned for Lucene: replace Lucene reserved characters with spaces so they don't break the query parser
+  const luceneCleaned = raw
+    .replace(/[+\-&|!(){}\[\]^"~*?:\\/]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (luceneCleaned) {
+    queries.add(`artist:"${luceneCleaned}"`);
+    queries.add(`"${luceneCleaned}"`);
+  }
+
+  // 2. Punctuation stripped completely (e.g. "JU!iE" -> "JUiE", "AC/DC" -> "ACDC")
+  const stripped = raw
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (stripped && stripped.toLowerCase() !== luceneCleaned.toLowerCase()) {
+    queries.add(`artist:"${stripped}"`);
+  }
+
+  // 3. Compact alphanumeric if distinct
+  const compact = raw.replace(/[^\p{L}\p{N}]/gu, "");
+  if (compact && compact.length >= 3 && compact.toLowerCase() !== stripped.toLowerCase()) {
+    queries.add(`artist:"${compact}"`);
+  }
+
+  return Array.from(queries);
+}
+
+// Compare release artist credits with target artist (handles special characters, full-width, and features)
+function isItemMatchingArtist(item, artistId, artistName) {
+  if (!item) return false;
+
+  // 1. ID or URI match
+  if (artistId && item.artists?.some((a) => a.id === artistId || a.uri === `spotify:artist:${artistId}`)) {
+    return true;
+  }
+
+  // 2. Normalized name match (ignoring accents, punctuation, casing)
+  if (artistName) {
+    const normTarget = normalizeSearchString(artistName);
+    const compactTarget = normTarget.replace(/[^\p{L}\p{N}]/gu, "");
+
+    const artistNameMatches = item.artists?.some((a) => {
+      if (!a?.name) return false;
+      const aNorm = normalizeSearchString(a.name);
+      if (aNorm === normTarget) return true;
+      const aCompact = aNorm.replace(/[^\p{L}\p{N}]/gu, "");
+      return compactTarget && aCompact === compactTarget;
+    });
+
+    if (artistNameMatches) return true;
+
+    // 3. Title credits match (e.g. "feat. JU!iE", "with JU!iE")
+    if (item.name && matchesSearchQuery(item.name, artistName)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function fetchArtistReleases(artistUri, artistName = "") {
   if (artistDiscographyCache.has(artistUri)) {
     return artistDiscographyCache.get(artistUri);
@@ -248,78 +416,59 @@ async function fetchArtistReleases(artistUri, artistName = "") {
   };
 
   // Obtain authorization token
-  let token = "";
-  try {
-    if (Spicetify.Platform?.Session?.accessToken) {
-      token = Spicetify.Platform.Session.accessToken;
-    } else if (Spicetify.Platform?.AuthorizationAPI?.getAccessToken) {
-      token = await Spicetify.Platform.AuthorizationAPI.getAccessToken();
-    }
-  } catch (err) {
-    console.warn("[Random Library] Access token fetch error:", err);
-  }
+  const token = await getSpotifyAccessToken();
 
   // Layer 1: Spotify Web API - Artist Catalog Groups
-  if (token) {
-    try {
-      const groups = ["album", "single", "compilation"];
-      const fetchGroup = async (group) => {
-        let nextUrl = `https://api.spotify.com/v1/artists/${artistId}/albums?include_groups=${group}&limit=50`;
-        while (nextUrl) {
-          try {
-            const res = await fetch(nextUrl, { headers: { Authorization: `Bearer ${token}` } });
-            if (!res.ok) break;
-            const data = await res.json();
-            if (!data?.items || data.items.length === 0) break;
+  // Strictly queries ["album", "single", "compilation"] (NO appears_on)
+  try {
+    const groups = ["album", "single", "compilation"];
+    const fetchGroup = async (group) => {
+      let nextUrl = `https://api.spotify.com/v1/artists/${artistId}/albums?include_groups=${group}&limit=50`;
+      while (nextUrl) {
+        try {
+          const data = await fetchWebApiJson(nextUrl, token);
+          if (!data?.items || data.items.length === 0) break;
 
-            for (const item of data.items) {
-              addRelease({
-                uri: item.uri,
-                name: item.name,
-                artist: item.artists?.map((a) => a.name).join(", ") || artistName,
-                imageUrl: item.images?.[0]?.url || item.images?.[1]?.url || "",
-                type: classifyRelease(item, group),
-                releaseDate: item.release_date || item.releaseDate || "",
-              });
-            }
-            nextUrl = data.next;
-          } catch {
-            break;
+          for (const item of data.items) {
+            addRelease({
+              uri: item.uri,
+              name: item.name,
+              artist: item.artists?.map((a) => a.name).join(", ") || artistName,
+              imageUrl: item.images?.[0]?.url || item.images?.[1]?.url || "",
+              type: classifyRelease(item, group),
+              releaseDate: item.release_date || item.releaseDate || "",
+            });
           }
+          nextUrl = data.next;
+        } catch {
+          break;
         }
-      };
+      }
+    };
 
-      await Promise.all(groups.map((g) => fetchGroup(g)));
-    } catch (err) {
-      console.warn("[Random Library] Web API catalog fetch error:", err);
-    }
+    await Promise.all(groups.map((g) => fetchGroup(g)));
+  } catch (err) {
+    console.warn("[Random Library] Web API catalog fetch error:", err);
+  }
 
-    // Layer 2: Spotify Web API - Search Discovery (captures collabs & main albums)
+  // Layer 2: Spotify Web API - Search Discovery (captures collabs & primary releases with Lucene-safe queries)
+  if (artistName) {
     try {
-      if (artistName) {
-        const searchQueries = [
-          `artist:"${artistName}"`,
-          `"${artistName}"`,
-        ];
+      const searchQueries = buildSearchQueries(artistName);
 
-        for (const query of searchQueries) {
-          let offset = 0;
-          let total = Infinity;
-          while (offset < total && offset < 500) {
-            const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=album&limit=50&offset=${offset}`;
-            const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-            if (!res.ok) break;
-            const data = await res.json();
+      for (const query of searchQueries) {
+        let offset = 0;
+        let total = Infinity;
+        while (offset < total && offset < 300) {
+          const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=album&limit=50&offset=${offset}`;
+          try {
+            const data = await fetchWebApiJson(url, token);
             const albums = data?.albums;
-            if (!albums || !albums.items || albums.items.length === 0) break;
+            if (!albums?.items || albums.items.length === 0) break;
 
             total = albums.total ?? albums.items.length;
             for (const item of albums.items) {
-              const matchesArtist =
-                item.artists?.some((a) => a.id === artistId || a.name.toLowerCase() === artistName.toLowerCase()) ||
-                item.name.toLowerCase().includes(artistName.toLowerCase());
-
-              if (matchesArtist) {
+              if (isItemMatchingArtist(item, artistId, artistName)) {
                 const groupHint = item.album_group || item.album_type || "album";
                 addRelease({
                   uri: item.uri,
@@ -332,6 +481,8 @@ async function fetchArtistReleases(artistUri, artistName = "") {
               }
             }
             offset += 50;
+          } catch {
+            break;
           }
         }
       }
@@ -369,57 +520,92 @@ async function fetchArtistReleases(artistUri, artistName = "") {
 
   // Layer 4: Spicetify GraphQL Discography Queries
   if (Spicetify.GraphQL?.Request) {
-    const discogDefs = [
-      Spicetify.GraphQL.Definitions?.queryArtistDiscographyAll,
+    const extractGraphQLItems = (collection, groupType) => {
+      if (!collection?.items) return 0;
+      for (const entry of collection.items) {
+        const rel = entry.releases?.items?.[0] || entry;
+        if (rel?.uri) {
+          const relType = rel.type || rel.albumType || groupType || "";
+          const totalTracks = rel.tracks?.totalCount || rel.tracks?.items?.length || 1;
+          const artistsList = rel.artists?.items?.map((a) => a.profile?.name || a.name).filter(Boolean).join(", ");
+          const imgUrl = rel.coverArt?.sources?.[0]?.url || rel.images?.[0]?.url || "";
+          const relDate = rel.date?.year ? String(rel.date.year) : (rel.date?.isoString || rel.releaseDate || "");
+
+          addRelease({
+            uri: rel.uri,
+            name: rel.name,
+            artist: artistsList || artistName,
+            imageUrl: imgUrl,
+            type: classifyRelease(
+              { ...rel, type: relType, total_tracks: totalTracks },
+              groupType
+            ),
+            releaseDate: relDate,
+          });
+        }
+      }
+      return collection.totalCount ?? collection.items.length;
+    };
+
+    // 4a. Artist Overview Query (fetches initial albums, singles, compilations)
+    try {
+      const overviewDef =
+        Spicetify.GraphQL.Definitions?.queryArtistOverview || {
+          name: "queryArtistOverview",
+          operation: "query",
+          sha256Hash: "ae0e2958a4ab645b35ca19ac04d0495ae12d9c5d7b7286217674801a9aab281a",
+          value: null,
+        };
+
+      const { data } = await Spicetify.GraphQL.Request(overviewDef, {
+        uri: artistUri,
+        locale: Spicetify.Locale?.getLocale?.() || "en",
+      });
+
+      const discog = data?.artistUnion?.discography;
+      if (discog) {
+        extractGraphQLItems(discog.albums, "album");
+        extractGraphQLItems(discog.singles, "single");
+        extractGraphQLItems(discog.compilations, "compilation");
+        extractGraphQLItems(discog.all, "");
+        extractGraphQLItems(discog.popularReleasesAlbums, "album");
+      }
+    } catch (err) {
+      console.warn("[Random Library] GraphQL overview query error:", err);
+    }
+
+    // 4b. Paginated Discography Queries (requires order: "DATE_DESC")
+    const paginatedDefs = [
+      Spicetify.GraphQL.Definitions?.queryArtistDiscographyAll || {
+        name: "queryArtistDiscographyAll",
+        operation: "query",
+        sha256Hash: "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599",
+        value: null,
+      },
       Spicetify.GraphQL.Definitions?.queryArtistDiscographyAlbums,
       Spicetify.GraphQL.Definitions?.queryArtistDiscographySingles,
       Spicetify.GraphQL.Definitions?.queryArtistDiscographyCompilations,
-      Spicetify.GraphQL.Definitions?.queryArtistOverview,
     ].filter(Boolean);
 
-    for (const def of discogDefs) {
+    for (const def of paginatedDefs) {
       try {
         let offset = 0;
         let total = Infinity;
         while (offset < total && offset < 500) {
           const { data } = await Spicetify.GraphQL.Request(def, {
             uri: artistUri,
-            locale: Spicetify.Locale?.getLocale?.() || "en",
-            includePrerelease: false,
             offset,
             limit: 100,
+            order: "DATE_DESC",
           });
 
           const discog = data?.artistUnion?.discography;
           if (!discog) break;
 
-          const extractItems = (collection, groupType) => {
-            if (!collection?.items) return 0;
-            for (const entry of collection.items) {
-              const rel = entry.releases?.items?.[0] || entry;
-              if (rel?.uri) {
-                const relType = rel.type || rel.albumType || groupType || "";
-                const totalTracks = rel.tracks?.totalCount || rel.tracks?.items?.length || 1;
-                addRelease({
-                  uri: rel.uri,
-                  name: rel.name,
-                  artist: rel.artists?.items?.map((a) => a.profile?.name).join(", ") || artistName,
-                  imageUrl: rel.coverArt?.sources?.[0]?.url || "",
-                  type: classifyRelease(
-                    { ...rel, type: relType, total_tracks: totalTracks },
-                    groupType
-                  ),
-                  releaseDate: rel.date?.year ? String(rel.date.year) : (rel.date?.isoString || ""),
-                });
-              }
-            }
-            return collection.totalCount ?? collection.items.length;
-          };
-
-          const t1 = extractItems(discog.all, "");
-          const t2 = extractItems(discog.albums, "album");
-          const t3 = extractItems(discog.singles, "single");
-          const t4 = extractItems(discog.compilations, "compilation");
+          const t1 = extractGraphQLItems(discog.all, "");
+          const t2 = extractGraphQLItems(discog.albums, "album");
+          const t3 = extractGraphQLItems(discog.singles, "single");
+          const t4 = extractGraphQLItems(discog.compilations, "compilation");
 
           total = Math.max(t1, t2, t3, t4, 0);
           if (total === 0 || offset >= total) break;
@@ -1620,9 +1806,9 @@ function RandomLibraryApp() {
     else if (sortBy === "artist-desc") list.sort((a, b) => b.artist.localeCompare(a.artist));
 
     if (debouncedMainQuery.trim()) {
-      const q = debouncedMainQuery.trim().toLowerCase();
+      const q = debouncedMainQuery.trim();
       list = list.filter(
-        (a) => a.name.toLowerCase().includes(q) || a.artist.toLowerCase().includes(q)
+        (a) => matchesSearchQuery(a.name, q) || matchesSearchQuery(a.artist, q)
       );
     }
 
@@ -1637,8 +1823,8 @@ function RandomLibraryApp() {
     else if (sortBy === "artist-desc" || sortBy === "name-desc") list.sort((a, b) => b.name.localeCompare(a.name));
 
     if (debouncedMainQuery.trim()) {
-      const q = debouncedMainQuery.trim().toLowerCase();
-      list = list.filter((a) => a.name.toLowerCase().includes(q));
+      const q = debouncedMainQuery.trim();
+      list = list.filter((a) => matchesSearchQuery(a.name, q));
     }
 
     return list;
@@ -1799,8 +1985,8 @@ function RandomLibraryApp() {
     }
 
     if (debouncedArtistQuery.trim()) {
-      const q = debouncedArtistQuery.trim().toLowerCase();
-      list = list.filter((a) => a.name.toLowerCase().includes(q));
+      const q = debouncedArtistQuery.trim();
+      list = list.filter((a) => matchesSearchQuery(a.name, q));
     }
 
     return list;
