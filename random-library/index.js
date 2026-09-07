@@ -204,6 +204,7 @@ async function fetchAllSavedAlbums(onProgress) {
 
       const firstArtist = item.artists?.[0];
       const artistUri = firstArtist?.uri || item.artistUri || (firstArtist?.id ? `spotify:artist:${firstArtist.id}` : "");
+      const releaseYear = item.publishDate?.year || item.year || item.releaseDate?.year || (typeof item.releaseDate === "string" ? item.releaseDate.slice(0, 4) : "") || "";
 
       albums.push({
         uri: item.uri,
@@ -212,6 +213,7 @@ async function fetchAllSavedAlbums(onProgress) {
         artistUri: artistUri,
         imageUrl: item.images?.[0]?.url ?? item.imgUrl ?? "",
         type: classifyRelease(item),
+        year: releaseYear ? String(releaseYear) : "",
       });
     }
 
@@ -222,6 +224,111 @@ async function fetchAllSavedAlbums(onProgress) {
 
   return albums;
 }
+
+// ---------------------------------------------------------------------------
+// 3b. Export Saved Albums Helper & Spicetify Global/Profile Menu Integration
+// ---------------------------------------------------------------------------
+async function exportSavedAlbums(format = "json") {
+  try {
+    let albums = savedAlbumCache;
+    if (!albums || albums.length === 0) {
+      Spicetify.showNotification?.("Fetching saved albums for export\u2026");
+      albums = await fetchAllSavedAlbums();
+      savedAlbumCache = albums;
+    }
+
+    if (!albums || albums.length === 0) {
+      Spicetify.showNotification?.("No saved albums found to export.");
+      return;
+    }
+
+    const cleanAlbums = albums.map((a) => ({
+      uri: a.uri,
+      name: a.name,
+      artist: a.artist,
+      year: a.year || "",
+      type: a.type || "album",
+      imageUrl: a.imageUrl || "",
+    }));
+
+    let content, filename, mimeType;
+    if (format === "csv") {
+      let csv = "\uFEFFArtist,Album,Year,Type,URI,ImageURL\n";
+      for (const a of cleanAlbums) {
+        const artist = `"${String(a.artist || "").replace(/"/g, '""')}"`;
+        const name = `"${String(a.name || "").replace(/"/g, '""')}"`;
+        const year = `"${String(a.year || "").replace(/"/g, '""')}"`;
+        const type = `"${String(a.type || "").replace(/"/g, '""')}"`;
+        const uri = `"${String(a.uri || "").replace(/"/g, '""')}"`;
+        const img = `"${String(a.imageUrl || "").replace(/"/g, '""')}"`;
+        csv += `${artist},${name},${year},${type},${uri},${img}\n`;
+      }
+      content = csv;
+      filename = "spotify_saved_albums.csv";
+      mimeType = "text/csv;charset=utf-8;";
+    } else {
+      content = JSON.stringify(cleanAlbums, null, 2);
+      filename = "spotify_saved_albums.json";
+      mimeType = "application/json";
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    Spicetify.showNotification?.(`Exported ${cleanAlbums.length} saved albums to ${filename}!`);
+  } catch (err) {
+    console.error("[Random Library] Failed to export saved albums:", err);
+    Spicetify.showNotification?.(`Export failed: ${err.message || err}`);
+  }
+}
+
+let exportMenuRegistered = false;
+
+function registerExportMenu() {
+  if (exportMenuRegistered) return;
+  if (typeof Spicetify === "undefined" || !Spicetify.Menu) return;
+
+  try {
+    const jsonItem = new Spicetify.Menu.Item(
+      "Export as JSON (.json)",
+      false,
+      () => exportSavedAlbums("json")
+    );
+    const csvItem = new Spicetify.Menu.Item(
+      "Export as CSV (.csv)",
+      false,
+      () => exportSavedAlbums("csv")
+    );
+
+    if (Spicetify.Menu.SubMenu) {
+      const subMenu = new Spicetify.Menu.SubMenu("Export Saved Albums", [jsonItem, csvItem]);
+      subMenu.register();
+    } else {
+      jsonItem.register();
+      csvItem.register();
+    }
+    exportMenuRegistered = true;
+  } catch (e) {
+    console.warn("[Random Library] Could not register export menu:", e);
+  }
+}
+
+// Initialize export menu in Spicetify Profile Menu
+(function initExportMenu() {
+  if (typeof Spicetify !== "undefined" && Spicetify.Menu && (Spicetify.Menu.SubMenu || Spicetify.Menu.Item)) {
+    registerExportMenu();
+  } else {
+    setTimeout(initExportMenu, 500);
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // 4. Followed Artists Fetcher (Instant Local Database)
@@ -1763,6 +1870,7 @@ function RandomLibraryApp() {
   }, []);
 
   useEffect(() => {
+    registerExportMenu();
     Promise.all([loadSavedLibrary(), loadFollowedArtists()])
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
